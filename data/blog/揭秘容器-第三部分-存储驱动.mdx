@@ -1,0 +1,383 @@
+---
+date: 2019-7-17
+title: 揭秘容器-第三部分-存储驱动
+tags: [Container, Storage-Driver, Docker]
+---
+
+应用通过Dockerfile做成容器镜像之后，容器镜像是分层的，每一层都是只读的，但是存在应用读/写/改文件的场景，在容器镜像内读/写/改文件，与传统的虚拟机或物理机上是存在差异的，这个差异就是不同的容器存储驱动，因此了解容器镜像如何构建/存储以及如何处理应用程序对文件的读写原理很重要，否则可能会在容器化之后引入性能问题。
+
+需要说明的是，本文针对容器镜像存储驱动范围，不包含[挂载卷](https://docs.docker.com/storage/volumes/)的场景。
+
+## 关于存储驱动
+
+###镜像与分层
+
+Docker镜像有很多层堆叠组成，每一层对应Dockerfile的一个指令，每一层都认为其下一层是只读的。假设有如下Dockerfile
+
+```
+FROM ubuntu:18.04
+COPY . /app
+RUN make /app
+CMD python /app/app.py
+```
+
+这个Dockerfile包含4个指令，每个指令创建一个分层。 `FROM` 指令从 `ubuntu:18.04` 创建一个分层；`COPY` 指令拷贝当前目录文件到容器镜像中；`RUN` 指令运行`make`命令编译程序；最后一层指定容器启动的命令。
+
+每一层仅保存上一层差异化的内容，层与层之间相互堆叠。当试用此镜像运行容器进程时候，一个新的层，被称为 “Container Layer”的层，创建在最上层。任何容器镜像内的文件创建/修改/删除都保存在“Container Layer”层。
+
+![](https://docs.docker.com/storage/storagedriver/images/container-layers.jpg)
+
+存储驱动负责处理层之间的文件读/写/删/改，不同的存储驱动在不同场景下各有优劣势。
+
+### 容器与分层
+
+容器的文件系统分层与镜像文件系统分层关键差异是容器文件系统分层在镜像文件系统之上，增加了一个可写层（Container Layer），所有的容器内的文件修改/删除/新增都保存到Container Layer，当容器被删除，Container Layer随之被删除，但是镜像层仍然被保留。
+
+每个容器有各自的Container Layer，容器的文件修改保存在各自的Container Layer中，但是他们都共享镜像分层。下图表示多个容器共享同一个Ubuntu 15.04镜像。
+
+![](https://docs.docker.com/storage/storagedriver/images/sharing-layers.jpg)
+
+### 容器在磁盘上的空间占用
+
+查看容器磁盘空间占用，试用`docker ps -s`命令，命令输出两个占用大小：
+
+- `size`: 可写层Container Layer在磁盘上分配的大小。
+- `virtual size`: 只读的镜像层与可写的Container Layer总大小。
+
+机器上所有容器占用的总空间由 `size` 与 `virutal size` 两个值计算得到。当然还有一些其他影响容器磁盘空间占用的因素：
+
+- 使用 `json-file` 日志驱动产生的日志文件。
+- 挂载的卷。
+- 容器的配置文件，通常很小。
+- 写入到磁盘的内容（如果启用了swapping）。
+- 检查点，如果使用了checkpoint/restore特性。
+
+### copy-on-write (CoW) 策略
+
+copy-on-write 策略实现文件高效的读写与共享。如果一个文件或目录在某层中存在，其他的层需要读取（包括可写的Container Layer），则直接读取该层的文件即可。如果是第一次修改此文件，则将文件拷贝到可写层然后修改。
+
+分层与CoW策略使得镜像分发与容器启动更高效，因为不同镜像可以共享相同的层。
+
+## 选择存储驱动
+
+理想情况下，容器内所有数据都写到挂载卷上，但是实际情况是一些场景下要求在容器内写入数据，因此需要考虑合适的存储驱动。
+Docker支持多种存储驱动，架构上不同存储驱动采用插件的方式插拔。
+
+一般在Host主机上，内核都支持多个存储驱动，按照通用的性能与稳定性维度，推荐如下：
+
+- `overlay2` 是优先推荐使用的存储驱动，在当前主流的Linux系统上，不需要额外配置。
+- `aufs` 在Docker 18.06以及之前的版本上是推荐优先使用的存储驱动，当时Ubuntu 14.04在Linux内核3.13版本上还不支持`overlay2`。
+- `devicemapper` 也是支持的，但是需要配置 `direct-lvm`，因为`loopback-lvm`性能较差。`devicemapper`在CentOS与RHEL系统上是优先推荐的存储驱动，因为这两个系统内核还不支持`overlay2`。但是最新版本的CentOS与RHEL已经支持`overlay2`了。
+- `btrfs` 与 `zfs` 在Host主机的文件系统（Backing Filesystem）也是对应的 `btrfs` 与 `zfs` 场景下使用。这两个文件系统允许一些高级操作，如创建快照，但是需要更复杂的维护与配置操作。
+- `vfs` 用于测试场景，且不支持CoW，因此性能较差。
+
+存储驱动优先选择顺序，可以在[Docker相关源代码](https://github.com/docker/docker-ce/blob/18.09/components/engine/daemon/graphdriver/driver_linux.go#L50)查看，不同的Docker版本选择不同的分支查看。
+
+除了Docker推荐的优先顺序，还有一些与业务场景相关的因素可以参考，因为不同的存储驱动有各自的性能特征。
+
+- `overlay2`, `aufs`, ``overlay` 存储驱动都是工作在文件系统层面，不是块设备层面，对内存利用率会相对较高，但是对于重度写文件的场景，容器的可写层大小会增长很快。
+- `devicemapper`, `btrfs`, `zfs` 是工作在块设备层面，对于重度写文件的场景性能较好（但是还是不如挂载卷）。
+- 对于大量小文件写的场景，或者是容器镜像层很多(层很深)的场景，`overlay` 性能比 `overlay2` 要好，但是会消耗更多的inode，极端场景下会导致inode耗尽。
+- `btrfs`, `zfs` 需要更多的内存。
+- `zfs` 适合容器密度很高的场景。
+
+存储驱动选择还需要考虑Host主机的文件系统类型，Docker存储驱动与Host主机文件系统匹配关系表如下：
+
+| Docker存储驱动        | Host文件系统类型            |
+| --------------------- | --------------------------- |
+| `overlya2`, `overlay` | `xfs` (设置ftype=1), `ext4` |
+| `aufs`                | `xfs`, `ext4`               |
+| `devicemapper`        | `direct-lvm`                |
+| `btrfs`               | `btrfs`                     |
+| `zfs`                 | `zfs`                       |
+| `vfs`                 | 任何文件系统                |
+
+## 使用 AUFS 存储驱动
+
+AUFS 是一种联合文件系统，在之前是默认的存储驱动，如果内核版本是4.0以及以上，则可以考虑overlay2存储驱动。
+
+### 使用AUFS的前提条件
+
+使用AUFS有一些前提条件：
+
+- Docker CE版本，AUFS在Ubuntu上支持，在Debian的Stretch之前版本支持。
+- Docker EE版本，AUFS在Ubuntu上支持。
+- 如果使用Ubuntu操作系统，需要安装额外的软件包用于将AUFS模块安装在内核中；如果不安装这些额外的软件包，在Ubuntu14.04上需要使用`devicemapper`存储驱动（这个是不推荐的），在Ubuntu16.04上使用`overlay2`。
+- AUFS不能在这些backing filesystem上使用：`aufs`, `btrfs`, `encryptfs` 。
+
+### 配置Docker使用aufs
+
+1. 检查内核是否支持AUFS
+
+```
+$ grep aufs /proc/filesystems
+
+nodev   aufs
+```
+
+2. 检查当前docker使用的存储驱动
+
+```
+$ docker info
+
+<truncated output>
+Storage Driver: aufs
+ Root Dir: /var/lib/docker/aufs
+ Backing Filesystem: extfs
+ Dirs: 0
+ Dirperm1 Supported: true
+<truncated output>
+```
+
+### aufs 工作原理
+
+AUFS 是联合文件系统，意思是将Host主机上多个目录以“联合”方式组成一个统一视图目录。在aufs术语中，每个目录被称为 "branches"，而在docker的术语中，称为 "layer" 。
+联合的过程也被称为联合挂载。下图展示了一个基于 `ubuntu:latest` 的容器进程的aufs：
+
+![](https://docs.docker.com/storage/storagedriver/images/aufs_layers.jpg)
+
+每一层，包含可写的Cotnainer Layer，都对应到 `/var/lib/docker` 下一个子目录，由联合挂载提供所有层的统一视图。`/var/lib/docker` 下目录名称与Layer ID名称不是对应的。
+
+### 镜像与容器文件在磁盘上结构
+
+下面的docker pull命令下载了一个包含5层的镜像
+
+```
+$ docker pull ubuntu
+
+Using default tag: latest
+latest: Pulling from library/ubuntu
+b6f892c0043b: Pull complete
+55010f332b04: Pull complete
+2955fb827c94: Pull complete
+3deef3fcbd30: Pull complete
+cf9722e506aa: Pull complete
+Digest: sha256:382452f82a8bbd34443b2c727650af46aced0f94a44463c62a9848133ecb1aa8
+Status: Downloaded newer image for ubuntu:latest
+```
+
+#### 镜像分层存储
+
+所有的镜像层与容器层都存储在 `/var/lib/docker/aufs/` 下：
+
+- `diff/`: 所有分层文件的内容，每层一个目录。
+- `layers/`: 记录分层文件之间如何堆叠的元数据文件，每个镜像或容器对应一个文件，每个文件保存所有层的ID。
+- `mnt/`: 挂载点，每个镜像或容器一个，用来组装与挂载联合文件系统。对于镜像来说，由于是只读的，这个目录是空的。
+
+#### 容器分层存储
+
+当容器运行起来之后，`/var/lib/docker` 的目录组织如下：
+
+- `diff/`: 可写层保存在此目录。
+- `layers/`: 可写层的元数据。
+- `mnt/`: 容器的联合文件系统挂载点，目录下的组织结构与在容器中看到的是完全一致的。
+
+### 容器如何读/写文件
+
+#### 读文件
+
+读文件的场景可以总结为三种情况：
+
+- 文件在container layer不存在：存储驱动在镜像层中搜索此文件，从container layer往下搜索。
+- 文件仅在container layer存在：直接读。
+- 文件在container layer与image layer都存在：从container layer读。
+
+#### 修改文件或目录
+
+写文件场景：
+
+- 首次写文件：首次写入已存在文件，文件在container layer不存在。aufs存储驱动从image layer拷贝此文件到container layer，然后应用在container layer写此文件。由于aufs工作在文件系统层而不是块设备层，因此需要将整个文件拷贝，如果文件很大，而实际只需要修改其中很小一部分，这么做可能会有一些性能问题，特别是镜像层比较深的时候。不过还好的是只是首次需要拷贝。
+- 删除文件或目录：删除文件对应存储驱动实现是在container layer创建一个whiteout文件，镜像层中的文件并未删除，因为镜像层是只读的。whiteout文件在应用中看不到，因此应用认为文件已经删除。
+- 重命名目录：aufs存储驱动不支持调用`rename(2)`重命名目录，调用重命名会得到 `EXDEV`("cross-device link not permitted")错误，即使重命明的源与目的在同一层。只有一种情况可以支持，那就是重命名的目录不包含任何子目录。应用程序如果有`rename(2)`操作，则需要考虑处理 `EXDEV`("cross-device link not permitted")错误。
+
+### AUFS性能
+
+AUFS存储驱动性能相关点如下：
+
+- AUFS存储驱动性能比`overlay2`性能要差，但是对于提供PaaS服务的场景来说是一个好选择，因为PaaS场景需要支持高密度的容器，AUFS能够在多个容器之间共享镜像分层，可以加速容器启动速度、减少磁盘空间占用。
+- 写文件的时延会比较高，因为第一次写文件需要被拷贝到container layer，如果文件所在的镜像层很深、文件很大，那么需要花费较多的时间去搜索与拷贝。
+
+### 性能最佳实践
+
+- 使用SSD
+- 对重度写文件的应用使用挂载卷（Volume）：对于重度写文件的应用，使用Volume能够提供可预期的，更好的性能，使用Voluem也能够绕过存储驱动的性能限制。
+
+## 使用 overlay 存储驱动
+
+OverlayFS与AUFS类似也是联合文件系统，但是OverlayFS实现上更简单因此更块。Docker支持两种OverlayFS：`overlay`, `overlay2`，建议使用`overlay2`，更稳定，同时对`inode`利用率更高。
+使用`overlay2`存储驱动，Linux内核需要4.0或以上，RHEL或CentOS的内核版本未1.10.0-514或以上。
+
+### 前提条件
+
+- Docker CE或Docker EE版本17.06.02-ee或以上支持`overlay2`存储驱动，且是默认的存储驱动。
+- `overlay2`驱动要求Linux内核为4.0版本或以上，或RHEL/CentOS的内核版本未1.10.0-514或以上。如果是更老的版本，则使用`overlay`。
+- 在backing filesystem为 `xfs` 的Host主机上也可以使用`overlay`或`overlay2`存储驱动，但是要求`xfs`设置选项`d_type=true`。使用`xfs_info`检查`ftype`选项是否为`1`；在格式化`xfs`时候，使用选项`-n ftype=1`。
+- 更换存储驱动会导致已有的容器与镜像无法被docker引擎识别，这时候需要通过`docker save`保存镜像并上传到镜像仓库，更换存储驱动后再拉取下来。
+
+### 配置 overlay 或 overlay2 存储驱动
+
+使用`overlay`存储驱动要求Linux内核版本为3.18或以上，使用`overlay2`则要求Linux内核为4.0或以上。
+
+下面步骤配置`overlay2`存储驱动，如果是`overlay`则替换即可。
+
+1. 停止docker
+
+```
+$ sudo systemctl stop docker
+```
+
+2. 备份`/var/lib/docker`
+
+```
+$ cp -au /var/lib/docker /var/lib/docker.bk
+```
+
+3. 如果你想给`/var/lib`单独设置文件系统，格式化一块磁盘挂载到`/var/lib/docker`
+
+4. 编辑`/etc/docker/daemon.json`，如果不存在此文件则创建；假设文件为空，添加如下内容
+
+```
+{
+  "storage-driver": "overlay2"
+}
+```
+
+5. 启动docker
+
+```
+$ sudo systemctl start docker
+```
+
+6. 检查docker引擎是否使用`overlay2`存储驱动
+
+```
+$ docker info
+
+Containers: 0
+Images: 0
+Storage Driver: overlay2
+ Backing Filesystem: xfs
+ Supports d_type: true
+ Native Overlay Diff: true
+<output truncated>
+```
+
+### overlay2 存储驱动工作原理
+
+OverlayFS在Host主机上堆叠2个目录并将他们联合为一个目录视图，这两个目录分别被称为“层”与“联合挂载”。OverlayFS将底层目录称为 `lowerdir` ，上层目录称为 `upperdir`，联合视图目录称为 `merged`。
+`overlay2`存储支持128个OverlayFS堆叠，这个能力在Docker对层相关操作时候（如`docker build`, `docker commit`）性能较好，且消耗backing filesystem上较少的inode资源。
+
+#### 镜像与容器文件在磁盘上结构
+
+通过`docker pull ubuntu`拉取镜像，在`/var/lib/docker/overlay2`目录下会存在6个目录。
+
+```
+$ ls -l /var/lib/docker/overlay2
+
+total 24
+drwx------ 5 root root 4096 Jun 20 07:36 223c2864175491657d238e2664251df13b63adb8d050924fd1bfcdb278b866f7
+drwx------ 3 root root 4096 Jun 20 07:36 3a36935c9df35472229c57f4a27105a136f5e4dbef0f87905b2e506e494e348b
+drwx------ 5 root root 4096 Jun 20 07:36 4e9fa83caff3e8f4cc83693fa407a4a9fac9573deaf481506c102d484dd1e6a1
+drwx------ 5 root root 4096 Jun 20 07:36 e8876a226237217ec61c4baf238a32992291d059fdac95ed6303bdff3f59cff5
+drwx------ 5 root root 4096 Jun 20 07:36 eca1e4e1694283e001f200a667bb3cb40853cf2d1b12c29feda7422fed78afed
+drwx------ 2 root root 4096 Jun 20 07:36 l
+```
+
+上面有一个`l`目录，这个目录下保存分层目录的短名称软链接，这么做是为了防止`mount`命令的参数过长。
+
+```
+$ ls -l /var/lib/docker/overlay2/l
+
+total 20
+lrwxrwxrwx 1 root root 72 Jun 20 07:36 6Y5IM2XC7TSNIJZZFLJCS6I4I4 -> ../3a36935c9df35472229c57f4a27105a136f5e4dbef0f87905b2e506e494e348b/diff
+lrwxrwxrwx 1 root root 72 Jun 20 07:36 B3WWEFKBG3PLLV737KZFIASSW7 -> ../4e9fa83caff3e8f4cc83693fa407a4a9fac9573deaf481506c102d484dd1e6a1/diff
+lrwxrwxrwx 1 root root 72 Jun 20 07:36 JEYMODZYFCZFYSDABYXD5MF6YO -> ../eca1e4e1694283e001f200a667bb3cb40853cf2d1b12c29feda7422fed78afed/diff
+lrwxrwxrwx 1 root root 72 Jun 20 07:36 NFYKDW6APBCCUCTOUSYDH4DXAT -> ../223c2864175491657d238e2664251df13b63adb8d050924fd1bfcdb278b866f7/diff
+lrwxrwxrwx 1 root root 72 Jun 20 07:36 UL2MW33MSE3Q5VYIKBRN4ZAGQP -> ../e8876a226237217ec61c4baf238a32992291d059fdac95ed6303bdff3f59cff5/diff
+```
+
+每个分层目录下，包含`diff`目录，`link`文件，`lower`文件， `merged`, `work`目录。
+
+`diff` 目录下包含当前层所有文件与目录。`link`文件记录当前层对应的短链接（`l`目录下）名称。
+
+```
+$ cat /var/lib/docker/overlay2/3a36935c9df35472229c57f4a27105a136f5e4dbef0f87905b2e506e494e348b/link
+
+6Y5IM2XC7TSNIJZZFLJCS6I4I4
+
+$ ls  /var/lib/docker/overlay2/3a36935c9df35472229c57f4a27105a136f5e4dbef0f87905b2e506e494e348b/diff
+
+bin  boot  dev  etc  home  lib  lib64  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
+```
+
+从倒数第二层开始到最上层，每层都包含`lower`文件，记录上一层的短链接名称。
+
+```
+$ cat /var/lib/docker/overlay2/223c2864175491657d238e2664251df13b63adb8d050924fd1bfcdb278b866f7/lower
+
+l/6Y5IM2XC7TSNIJZZFLJCS6I4I4
+```
+
+`merged` 目录是联合挂载后的所有层视图。`work`目录是OverlayFS内部使用。
+
+最后，通过`mount`命令可以查看挂载详情：
+
+```
+$ mount | grep overlay
+
+overlay on /var/lib/docker/overlay2/9186877cdf386d0a3b016149cf30c208f326dca307529e646afce5b3f83f5304/merged
+type overlay (rw,relatime,
+lowerdir=l/DJA75GUWHWG7EWICFYX54FIOVT:l/B3WWEFKBG3PLLV737KZFIASSW7:l/JEYMODZYFCZFYSDABYXD5MF6YO:l/UL2MW33MSE3Q5VYIKBRN4ZAGQP:l/NFYKDW6APBCCUCTOUSYDH4DXAT:l/6Y5IM2XC7TSNIJZZFLJCS6I4I4,
+upperdir=9186877cdf386d0a3b016149cf30c208f326dca307529e646afce5b3f83f5304/diff,
+workdir=9186877cdf386d0a3b016149cf30c208f326dca307529e646afce5b3f83f5304/work)
+```
+
+### 容器如何读/写文件
+
+文件读/写原理与aufs是类似的，不单独阐述。
+
+### OverlayFS性能
+
+`overlay2`, `overlay` 存储驱动的性能要比 `aufs`, `devicemapper` 好，在某些场景下，`overlay2`甚至比`btrfs`更好。不过有如下点要注意。
+
+- 页面缓存（Page Caching）：OverlayFS支持页面缓存共享，多个容器访问同一个文件会共享同一个页面缓存，使得内存利用率较高，适合高密度容器场景。
+- CoW：由于使用页面缓存，CoW的性能要比`aufs`好。
+- inode 限制：使用`overlay`存储驱动可能会导致inode耗尽，特别是在高密度容器场景下容易出现。要增加inode只能重新格式化文件系统，因此强烈推荐使用`overlay2`。
+
+### 性能最佳实践
+
+与aufs的建议类似，使用SSD磁盘，对于重度写磁盘的应用，使用挂载卷（Volume）替代写容器目录。
+
+### OverlayFS兼容性限制
+
+- `open(2)`: OverlayFS只实现了部分POSIX标准，这个可能会导致某些操作违反POSIX标准。典型的是CoW操作。假设应用代码调用两次open，`fd1=open("foo", O_RDONLY)`, `fd2=open("foo", O_RDWR)`，应用代码是认为`fd1`, `fd2`引用同一个文件，但是由于CoW机制，`fd1`文件很可能在`lowerdir`，`fd2`文件在`upperdir`，并不是同一个文件。
+- `rename(2)`: 与aufs类似，不支持子目录不是空的目录的rename，应用需要做对应处理。
+
+## DeviceMapper 存储驱动
+
+### 工作原理
+
+Devicemapper 驱动工作在块设备层而不是文件系统层，使用Linux LVM + Thin Provision 管理块设备。在镜像分层管理机制上，每一层都是其依赖的上一层的快照，然后把差异内容保存到独立的 LVM volume 上。
+
+![](https://docs.docker.com/storage/storagedriver/images/two_dm_container.jpg)
+
+使用快照有几点好处(官网介绍的，个人存疑虑，这也是devicemapper被抛弃的原因吧):
+
+- 不同容器之间共享的层只在磁盘上存一份(Overlay驱动也是一样啊)??
+- 快照使用 copy-on-write 策略，只读层的文件只在需要修改的时候才被拷贝到可写层（Overlay驱动也是一样啊)??
+- 由于 `devicemapper` 是工作在块设备层，可写层的多个块设备可以并行写(Overlay驱动也是可以同时写不同的文件啊，难道这里的多个块设备是指同一个文件的不同块设备??)
+- 快照可以方便备份，拷贝 `/var/lib/docker/devicemapper/` 目录即可
+
+至于为何要使用 `Thin Provision` ，个人理解是方便实现 "allocate-on-demand" ，特别是可写层，可以申明一个所有层相加的总大小，但是实际使用多大是根据应用程序要写多少文件来决定的。
+
+### 性能
+
+`devicemapper` 比其他的存储驱动要使用更多的内存，每个运行的容器都会把需要修改的文件加载到内存中，使用的内存大小依赖于当前有多少个容器在修改多少个文件。基于此，`devicemapper` 驱动不适合于高密度容器场景。
+
+##
+
+## References
+
+[docker-stroagedriver](https://docs.docker.com/storage/storagedriver/)
+
+[Setup Thin Provisioning Volumes in Logical Volume Management (LVM) – Part IV](https://www.tecmint.com/setup-thin-provisioning-volumes-in-lvm/)

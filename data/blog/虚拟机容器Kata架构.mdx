@@ -1,0 +1,353 @@
+---
+date: 2019-7-2
+title: 虚拟机容器Kata架构
+tags: [虚拟机容器, Container, Docker, Kata]
+---
+
+容器（Container）是一种轻量级虚拟化技术，“轻量”主要是因为容器与传统虚拟机比较，是内核共享的，所以启动快、资源占用小。随着虚拟化技术发展，Docker与Kubernets逐步成为应用打包与部署的标准，以及公有云租赁模式推广，出现了“虚拟机容器”这种形态。
+
+虚拟机容器首先是一台虚拟机，由于Docker镜像打包与分发方面的优势（分层构建、Build Once Run Anywhere），虚拟机容器也兼容Docker镜像；并提供了OCI规范的 runtime ，且适配了Kubernetes调度管理API，能够被Kubernetes调度，因此被称为虚拟机容器。
+
+虚拟机容器主要使用场景是在公有云模式下，云服务厂商提供无服务器计算服务（函数服务，无服务器容器），这种模式下租户只租一个容器或进程，不同租户的容器/进程可能运行到同一台机器上，传统的内核共享模式在这种场景下安全风险太高，虚拟机容器能够做到内核独占，适合这种场景。
+
+## Kata 项目介绍
+
+[Kata](https://katacontainers.io) 源自 Intel 的开源项目 [Hyper.sh](https://github.com/hyperhq) ，当前在 Openstack 软件基金会（OSF）下治理。
+
+Kata南向虚拟化实现技术可插拔，当前支持QEMU/NEMU，在最新的1.5版本里支持Firecrack；北向支持与Docker的Containerd对接，并可以被Kubernetes编排，接入Docker与Kubernetes生态。
+
+## Kata 架构概览 (基于1.5版本)
+
+### Kata container runtime and shimv2
+
+Kata容器项目主要由容器运行时（ kata container runtime ）与一个兼容CRI接口的 shim 部件组成。
+
+[Kata container runtime](https://github.com/kata-containers/runtime) 符合 [OCI](https://github.com/opencontainers) [运行时规范](https://github.com/opencontainers/runtime-spec) 因此能够被Docker引擎管理，作为Docker引擎的一个runtime插件。
+Kata container runtime 还基于[Containerd的CRI插件](https://github.com/kubernetes/community/blob/master/contributors/devel/container-runtime-interface.md)与[CRI-O](https://github.com/kubernetes-incubator/cri-o)实现了[Kubernetes的CRI规范](https://github.com/containerd/cri)，因此，使用者可以在Docker默认的runtime [runc](https://github.com/opencontainers/runc) 与 kata container runtime (runv) 之间平滑切换，上层组件不感知差异。
+
+![](https://github.com/kata-containers/documentation/raw/master/design/arch-images/docker-kata.png)
+
+Kata容器的另外一个组成部分是 [containerd-shim-kata-v2](https://github.com/kata-containers/runtime/tree/master/containerd-shim-v2) ，简称为 shimv2 ， shimv2 提供了了 Containerd Runtime V2 (Shim API) 的 Kata 实现，从而使得 Kubernetes 场景下能够实现每个 Pod 一个 shim 进程 -- shimv2 ；而在此之前，一个Pod需要一个2个shim（ containrd-shim, kata-shim ），如果 Pod Sandbox没有暴露 VSOCK 则还需要一个 kata-proxy 。
+
+![](https://github.com/kata-containers/documentation/raw/master/design/arch-images/shimv2.svg?sanitize=true)
+
+### agent 与 kata-proxy
+
+Kata容器运行在虚拟机沙箱内，每个虚拟机内运行一个Agent，Agent负责运行container。Agent同时提供gRPC接口，通过QEMU的VIRTIO serial或VSOCK接口向HOST主机暴露接口，主机上的 kata-runtime 使用gRPC协议与Agent通信，向虚拟机内的容器发送指令，I/O流也通过此通道管理。
+如果是使用 VIRTIO serial 的方式暴露接口到Host主机，那么还需要在主机上部署一个 kata-proxy 负责转发指令到Agent。
+
+### 容器进程管理
+
+在Host主机上，每个容器进程的清理是由更上层的进程管理器完成的，在Docker containerd的实现里，进程管理器是 containerd-shim ；在CRI-O的实现里是common。
+
+在Kata容器场景下，容器进程运行在虚拟机内，Host主机上的进程管理器不能直接管理到容器进程，Kata容器项目通过 kata-shim 来解决此问题。kata-shim 运行在Host主机上，介于容器进程管理器与kata-proxy之间，kata-shim 将来自Host主机的信号量、stdin 转发到虚拟机内的容器进程上，并将虚拟机容器内的stdout与stderr转发到Host主机上的容器进程管理器。
+
+kata-runtime 为每个容器进程创建一个 kata-shim 守护进程，为每个通过OCI命令连接到容器进程内部执行用户命令的操作创建一个 kata-shim 守护进程（如docker exec）。
+
+在 Kata1.5 版本，shimv2 收编 kata-runtime, kata-shim, kata-proxy 到 shimv2 进程中。
+
+## 虚拟化
+
+Kata 架构上能够支持多种虚拟化实现，在 Kata1.0 版本，支持 [QEMU](http://www.qemu-project.org/)/[KVM](http://www.linux-kvm.org/page/Main_Page) 虚拟化。在 [Kata1.5](https://aws.amazon.com/cn/blogs/opensource/kata-containers-1-5-firecracker-support/) 版本，支持 [AWS Firecracker](https://firecracker-microvm.github.io/) 极轻量的虚拟机。
+
+![](https://github.com/kata-containers/documentation/blob/master/design/arch-images/qemu.png)
+
+### QEMU/KVM
+
+根据Host主机架构，Kata容器支持多种主机类型，比如 x86 上的 `pc` 与 `q35` ，ARM 上的 `virt` ， IBM Power System 上的 `pseries` 。默认的Kata容器主机类型是 `pc` ，默认主机类型可以通过配置修改。
+
+Kata容器使用下面的 QEMU 特性来管理资源配额、缩短启动时间、减少内存占用：
+
+- 机器加速器
+- 热插拔设备
+
+#### 机器加速器
+
+机器加速器是与特定服务器架构相关的，机器加速器能够提升性能并开启某些特性。下面这些机器加速器在Kata容器中使用。
+
+- NVDIMM: x86平台的机器加速器，仅支持 `pc` 与 `q35` 机器类型。nvdimm 用来以持久化内存（persistent memory）方式提供虚拟机的根文件系统。
+
+虽然Kata容器能够支持大多数QEMU发行版本，但是考虑到Kata容器的启动时间、内存占用、IO性能因素，Kata容器使用一个针对这些因素专门优化过的QEMU版本 [qemu-lite](https://github.com/kata-containers/qemu/tree/qemu-lite-2.11.0) ，并增加了一些自定义的机器加速器，这些自定义加速器在 QEMU Upstream 版本中不可用。
+
+- nofw: x86平台的机器加速器，仅支持 `pc` 与 `q35` 机器类型。 `nofw` 用来启动 ELF 格式的系统内核，但是可以跳过 BIOS 与固件自检 (BIOS/firmware) ，这个加速器可以显著提升虚拟机启动速度。
+- static-prt: x86平台的机器加速器，仅支持 `pc` 与 `q35` 机器类型。 `static-prt` 用来减少虚拟机ACPI(Advanced Configuration and Power Management Interface)的解释负担。
+
+#### 热插拔设备
+
+Kata容器虚拟机初始以最小的资源启动，为了提升启动速度，在启动过程中，设备可以热插到虚拟机上。如，容器定义了cpu资源，可以通过热插的方式加到虚拟机上。Kata容器虚拟机支持如下热插设备：
+
+- Virtio block
+- Virtio SCSI
+- VFIO
+- CPU
+
+### Kernel 与 Image
+
+#### 虚拟机内核
+
+虚拟机内核在虚拟机启动时候被加载，Kata容器提供的虚拟机内核针对启动时间与内存占用做了优化。
+
+#### 虚拟机镜像
+
+Kata 容器支持 `initrd` 与 `root filesystem` 两种虚拟机镜像。
+
+##### root filesystem
+
+Kata 容器提供的默认打包好的 root filesystem 镜像，这种镜像也被称为 "mini O/S"，是基于 [Clear Linux](https://clearlinux.org/) 优化的，提供最小的运行环境与高度优化的启动路径。
+镜像中只有Kata Agent与systemd两个进程，用户的工作负载被打包到docker镜像，在虚拟机内通过libcontainer库，以runc方式运行起来。
+
+举例，当用户执行 `docker run -it ubuntu date` 命令时，流程如下：
+
+- 虚拟化层加载虚拟机内核，虚拟机内核加载虚拟机镜像。
+- `systemd` 启动虚拟机运行环境（mini-OS Context），并启动 kata-agent 进程（在同一个Context）
+- kata-agent 创建一个独立的context，运行用户指定的命令（例子中是 date ）
+- kata-agent 准备 ubuntu 的运行环境并运行 date 命令
+
+#### initrd
+
+待补充。
+
+## Agent
+
+kata-agent 是一个运行在虚拟机中的进程管理虚拟机中的容器进程。
+
+kata-agent 的最小运行单元是沙箱，一个 kata-agent 沙箱是一个由一些列namespace(NS, UTS, IPC, PID)隔离出来的。 kata-runtime 能够在一个虚拟机内运行多个容器进程以支持POD内多个container模式。
+
+kata-agent 使用gRPC协议与Kata其他组件通信，在gRPC同一个URL上还运行了一个 [yamux](https://github.com/hashicorp/yamux) 服务。
+
+kata-agent 使用 [libcontainer](https://github.com/opencontainers/runc/tree/master/libcontainer) 管理容器生命周期，复用了 [runc](https://github.com/opencontainers/runc) 的大部分代码。
+
+## Runtime
+
+kata-runtime 是一个符合OCI规范的容器运行时，负责处理[OCI运行时规范](https://github.com/opencontainers/runtime-spec)中的所有命令，并启动 kata-shim 进程。
+
+## 关键的OCI命令实现
+
+### create
+
+kata-runtime 处理 OCI [create](https://github.com/kata-containers/runtime/blob/master/cli/create.go) 命令步骤：
+
+1. 创建虚拟机与shim进程的network namespace。
+2. 执行 pre-start hook ，回调中负责创建 `veth` 网络设备，用于连接主机网络与新创建的network namespace。
+3. 扫描新创建的network namespace，在其中的veth设备上创建一个macvtab设备。
+4. 在新的network namespace中创建虚拟机，并将tab设备传递给虚拟机。
+5. 等待虚拟机启动完成。
+6. 启动kata-proxy，kata-proxy负责代理所有发送给虚拟机的请求，每个虚拟机一个kata-proxy进程。
+7. 调用kata-agent接口配置虚拟机内的沙箱。
+8. 调用kata-agent接口创建容器，使用kata-runtime提供的默认的OCI配置文件 `config.json` 。
+9. 启动kata-shim进程，kata-shim连接到kata-agent的gRPC socket端口。kata-shim会创建几个Go routine阻塞式调用 `ReadStdout()`, `ReadStderr()`, `WaitProcess()` 。`ReadStdout()`, `ReadStderr()` 以死循环方式执行直到虚拟机内的容器进程中止。 `WaitProcess()` 返回虚拟机内容器进程的 exit code。 kata-shim运行在虚拟机的network namespace中，通过kata-shim进程可以找到创建了哪些namespace。启动 kata-shim 进程还会创建一个新的PID namespace，对应到同一个container的所有kata-shim进程都在同一个PID namespace，这样当容器进程终止时候很容器将所有kata-shim进程终止掉。
+
+此时容器进程在虚拟机内部运行起来了，在Host主机上对应到kata-shim进程。
+
+![](https://github.com/kata-containers/documentation/blob/master/design/arch-images/kata-oci-create.svg)
+
+### start
+
+传统容器的 start 会在容器namespace中启动容器进程。Kata容器中， [start](https://github.com/kata-containers/runtime/blob/master/cli/start.go) 会在虚拟机内启动容器的工作负载，步骤如下；
+
+1. 调用kata-agent接口在虚拟机内启动容器负载命令。如，容器内负载命令为 `top` ，kata-shim 进程的 `ReadStdout()` 会读取到 top 的输出， `WaitProcess()` 会一直等待到 top 命令结束。
+2. 执行 post-start 回调，当前 post-start 实现为空。
+
+![](https://github.com/kata-containers/documentation/blob/master/design/arch-images/kata-oci-start.svg)
+
+### exec
+
+OCI 的 exec 命令允许在已有的容器中执行命令。在Kata容器中， [exec](https://github.com/kata-containers/runtime/blob/master/cli/exec.go) 执行步骤如下：
+
+1. 调用kata-agent接口在已有容器中执行命令。
+2. 一个新的kata-shim进程会创建出来，被放置到已有容器对应的kata-shim所在的PID namespace中。
+
+![](https://github.com/kata-containers/documentation/blob/master/design/arch-images/kata-oci-exec.svg)
+
+此时通过 exec 命令启动的新的容器负载已经在虚拟机内运行，共享已有容器的namespace (uts, pid, mnt, ipc) 。
+
+### kill
+
+OCI kill 命令通过发送 UNIX 信号，如 `SIGTERM`, `SIGKILL` ，来终止容器进程。在Kata容器中， [kill](https://github.com/kata-containers/runtime/blob/master/cli/kill.go) 命令会终止虚拟机内的容器进程与虚拟机。
+
+1. 调用kata-agent接口请求kill容器进程。
+2. 等待 kata-shim 进程退出。
+3. 调用kata-agent接口请求强制kill容器进程（发送 KILL 信号量给容器进程），如果 kata-shim 进程在超时时间内未退出。
+4. 等待 kata-shim 进程退出，如果等待超时则报错。
+5. 调用kata-agent接口删除虚拟机内的容器配置。
+6. 调用kata-agent接口删除虚拟机内的沙箱配置。
+7. 停止虚拟机。
+8. 删除network namespace中的网络配置，删除network namespace。
+9. 执行 post-stop 回调。
+
+### delete
+
+[delete](https://github.com/kata-containers/runtime/blob/master/cli/delete.go) 指令删除容器所有相关的资源，正在运行中的容器不能不删除，除非通过 `--force` 指令强制删除。
+
+如果虚拟机内的沙箱未停止，但是沙箱内的容器进程已经推出，kata-runtime会先执行一次kill流程，之后如果沙箱已经停止，kata-runtime执行如下动作：
+
+1. 删除容器相关资源：目录 `/var/{lib,run}/virtcontainers/sandboxes/<sandboxID>/<containerID>` 下的所有文件。
+2. 删除沙箱：目录 `/var/{lib,run}/virtcontainers/sandboxes/<sandboxID>` 下的所有文件。
+
+此时，所有容器相关内容都已经在Host主机上被删除，没有任何相关进程在运行。
+
+### state
+
+state 返回容器的运行状态。在Kata容器中，[state]() 需要检测容器进程是否在运行，通过检查对应容器进程的 kata-shim 进程的状态。
+
+1. 通过存储在磁盘上的信息获得容器状态（需要澄清）。
+2. 检查kata-shim进程。
+3. 如果kata-shim进程不存在，但是磁盘上的容器状态文件还是ready或running，那么意味着在得到容器返回状态之前，容器进程已经被正常停止了。
+
+## Proxy
+
+Host主机与虚拟机通信可以通过 `virtio-serial` 或 `virtio-socket` ， `virtio-socket` 需要内核版本 4.8 以上。默认使用 `virtio-serial` 。
+
+虚拟机内可能运行多个容器进程，在使用 `virtio-serial` 场景下，需要Host主机上运行 multiplexed 与 demultiplexed 进程；使用 `virtio-socket` 则不需要。
+
+`kata-proxy` 进程提供代理访问虚拟机内的 `kata-agent` ，对应到多个 kata-shim 进程与 kata-runtime 客户端。 `kata-proxy` 主要功能是负责代理IO流与信号量到 `kata-agent` 。 `kata-proxy` 通过Unix domain socket方式连接 `kata-agent` 。
+
+## Shim
+
+容器进程回收器（reaper），如Docker的 `containerd-shim` 或 CRI-O 的 `common` ，其设计假设是基于能够监控并回收实际的容器进程。在Kata容器中，由于容器进程运行在虚拟机中，Host主机上的容器进程回收器不能直接监控到虚拟机内的容器进程，至多能看到QEMU进程，这个是远远不够的。Kata容器中的kata-shim进程是主机上对应到虚拟机内容器进程的映射，因此kata-shim进程需要处理容器进程的I/O流并负责转发信号到容器进程。
+
+1. kata-shim 通过Unix domain socket连接到kata-proxy，socket URL是由kata-runtime在启动kata-shim进程时候传递给kata-shim的，一并传递的参数还有containerID与execID，containerID与execID用来标识虚拟机内的容器进程。
+2. 转发来自容器进程回收器的标准输入流，通过kata-proxy的gRPC的 `WriteStdin` API。
+3. 从容器进程读取标准输出与错误输出。
+4. 转发来自容器进程回收器的信号，通过kata-proxy的 `SignalProcessRequest` API。
+5. 监控终端的变化并转发，通过kata-proxy的 `TtyWinResize` API。
+
+## Networking
+
+容器进程一般被放置在独立的network namespace中，在容器生命周期的某个点，容器引擎会创建network namespace并将容器进程加入到network namespace中。容器进程网络与主机Host网络隔离。
+在实现技术上，通常使用[veth](https://blog.kghost.info/2013/03/27/linux-network-tun/)技术，[veth](https://blog.kghost.info/2013/03/27/linux-network-tun/)的两端分别放置到容器的network namespace与主机Host的network namespace中。这种方式是以namespace为中心的，而一些虚拟化技场景下不支持veth，特别是QEMU，这种情况下使用[TAP](https://segmentfault.com/a/1190000009249039)技术替代。
+
+为了消除虚拟化场景下网络隔离与容器场景下网络隔离的不兼容，kata-runtime使用veth+tab(MACVLAN)方式实现网络隔离与互通。
+
+- 主机Host网络与容器网络通过network namespace隔离，使用veth互通。
+- 容器网络network namespace内的veth网络设备上创建MACVLAN（实际上为MACVTAP）设备。
+- 在创建虚拟机（QEMU）时候，将TAP网络设备作为虚拟机网卡。
+- 虚拟机内的容器进程使用虚拟机网卡作为主网卡与外部通信，虚拟机内部的多个POD共享虚拟机网络，不再隔离。
+
+![](https://github.com/kata-containers/documentation/raw/master/design/arch-images/network.png)
+
+Kata容器支持 [CNM](https://github.com/docker/libnetwork/blob/master/docs/design.md#the-container-network-model) 与 [CNI](https://github.com/containernetworking/cni) 两种容器网络标准。
+
+### CNM
+
+![](https://github.com/kata-containers/documentation/raw/master/design/arch-images/CNM_overall_diagram.png)
+
+#### CNM lifecycle
+
+1. RequestPool
+
+2. CreateNetwork
+
+3. RequestAddress
+
+4. CreateEndPoint
+
+5. CreateContainer
+
+6. Create config.json
+
+7. Create PID and network namespace
+
+8. ProcessExternalKey
+
+9. JoinEndPoint
+
+10. LaunchContainer
+
+11. Launch
+
+12. Run container
+
+#### CNM 网络配置过程
+
+1. 读取 `config.json`
+2. 创建network namespace: netns
+3. 回调 `prestart` 钩子（在netns内）
+4. 扫描netns命名空间下的，由`prestart`回调创建的网络接口
+5. 创建bridge/tap并通过veth与主机连接
+
+![](https://github.com/kata-containers/documentation/raw/master/design/arch-images/CNM_detailed_diagram.png)
+
+### 网络热插拔
+
+Kata容器开发了一套命令与api支持添加/删除/查看 guest网络。下面流程图展示了Kata容器热插拔的流程。
+
+![](https://github.com/kata-containers/documentation/raw/master/design/arch-images/kata-containers-network-hotplug.png)
+
+## 存储
+
+Kata容器的虚拟机与Host通过[9pfs](https://www.kernel.org/doc/Documentation/filesystems/9p.txt)共享文件，对于虚拟机内的容器，不建议使用主流的overlay2存储驱动，overlay2存储驱动是基于文件系统的。
+
+## Kubernetes 集成
+
+Kubernetes目前是容器编排的事实标准，Kubernetes为了解耦Kubelet与各种容器runtime，抽象了[CRI(Container Runtime Interface)接口规范](https://github.com/kubernetes/community/blob/master/contributors/design-proposals/node/container-runtime-interface-v1.md)，Kubelet相当于是一个CRI客户端，不同的CRI实现提供gRPC接口与Kubelet对接，接入到Kubernetes生态。当前基于[OCI](https://github.com/opencontainers/runtime-spec)标准容器提供的CRI接口实现有[CRI-O](https://github.com/kubernetes-incubator/cri-o)与[Containerd CRI Plugin](https://github.com/opencontainers/runtime-spec)。
+
+Kata容器的runtime是CRI-O与Containerd CRI Plugin的官方runtime之一，因此Kata容器可以很容易的集成到Kubernetes生态中。
+
+但是由于Kubernetes最小调度单元是Pod而非容器进程，一个Pod可以有多个容器进程，而Kata容器又是将容器进程跑在虚拟机内的，因此Kata容器需要Kubernetes在创建容器进程传递更多信息，用来告知Kata runtime是要创建一个新的虚拟机，还是在已有虚拟机内启动容器进程。
+
+### Containerd CRI Plugin 集成kata-runtime
+
+在Kata1.5版本，对应containerd1.2.0，通过`shimv2`实现了Kata runtime与Kubernetes集成，具体指导参考[链接](https://github.com/kata-containers/documentation/blob/master/how-to/how-to-use-k8s-with-cri-containerd-and-kata.md#configure-containerd-to-use-kata-containers)。CRI-O的实现也正在开发中，跟踪[此Issue](https://github.com/kubernetes-sigs/cri-o/issues/2024)。
+
+### CRI-O 集成Kata-runtime
+
+#### OCI annotations
+
+为了让kata-runtime（或者任何虚拟机容器的runtime）区分是要创建一个虚拟机还是仅在虚拟机内创建容器进程，CRI-O在OCI配置文件（config.json）中增加了一个annotation来告知这个区分给kata-runtime。
+
+在执行runtime之前，CRI-O会增加一个`io.kubernetes.cri-o.ContainerType`的annotation，这个注解由Kubelet生成，取值范围是`sandbox`, `container`，kata-runtime将`sandbox`对应到创建虚拟机（新Pod），`container`对应到在已有Pod中创建容器进程。
+
+```go
+containerType, err := ociSpec.ContainerType()
+if err != nil {
+    return err
+}
+
+handleFactory(ctx, runtimeConfig)
+
+disableOutput := noNeedForOutput(detach, ociSpec.Process.Terminal)
+
+var process vc.Process
+switch containerType {
+case vc.PodSandbox:
+    process, err = createSandbox(ctx, ociSpec, runtimeConfig, containerID, bundlePath, console, disableOutput, systemdCgroup)
+    if err != nil {
+        return err
+    }
+case vc.PodContainer:
+    process, err = createContainer(ctx, ociSpec, containerID, bundlePath, console, disableOutput)
+    if err != nil {
+        return err
+    }
+}
+```
+
+#### 虚拟机容器与namespace隔离容器混合管理
+
+一个有趣的演进是在一个Kubernetes集群中混合管理虚拟机容器与namespace隔离的容器。
+现在Kubernetes集群运维人员可以对工作负载打`trusted`, `untrusted`标签，`trusted`标签表示工作负载是安全的，`untrusted`表示工作负载存在潜在风险，在支持kata容器的Kubernetes集群中，会自动根据标签，将`trusted`工作负载以`runc`方式运行，`untrusted`工作负载以runv（kata-runtime）方式运行。
+
+CRI-O默认行为是认为所有的工作负载在都是`trusted`，除非设置了注解`io.kubernetes.cri-o.TrustedSandbox=false`，CRI-O默认的trust配置在`configuration.toml`中。
+
+综合来看，CRI-O是选择`runc`还是`runv`，由Pod的`Privileged`参数，CRI-O trust配置`trusted/untrusted`，`io.kubernetes.cri-o.TrustedSandbox`注解三个值确定。
+如果Pod是`Privileged`，那么只能是`runc`。如果Pod不是`Privileged`，那么runtime的选择方式如下：
+
+|                                  | io.kubernetes.cri-o.TrustedSandbox 未设置 | io.kubernetes.cri-o.TrustedSandbox=true | io.kubernetes.cri-o.TrustedSandbox=false |
+| -------------------------------- | ----------------------------------------- | --------------------------------------- | ---------------------------------------- |
+| 默认的CRI-O turst设置: trusted   | runc                                      | runc                                    | runv(kata-runtime)                       |
+| 默认的CRI-O turst设置: untrusted | runv(kata-runtime)                        | runv(kata-runtime)                      | runv(kata-runtime)                       |
+
+## Reference
+
+[Kata](https://katacontainers.io)
+
+[Kata Containers 1.5 Release with Support for Firecracker](https://aws.amazon.com/cn/blogs/opensource/kata-containers-1-5-firecracker-support/)
+
+[Kata Containers Architecture](https://github.com/kata-containers/documentation/blob/master/design/architecture.md)
+
+[Intel NEMU](https://github.com/intel/nemu)
+
+[“Honey, I shrunk the hypervisor](https://events.linuxfoundation.org/wp-content/uploads/2017/12/%E2%80%9CHoney-I-Shrunk-the-Hypervisor%E2%80%9D-Building-a-Legacy-Free-Platform-for-QEMU-Robert-Bradford-Intel-Corporation.pdf)
+
+[nvdimm](https://www.jianshu.com/p/2c0d797fdcc5)

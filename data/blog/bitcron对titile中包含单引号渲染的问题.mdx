@@ -1,0 +1,18 @@
+---
+tags: [bitcron, title, 单引号]
+date: 2017-8-27
+title: bitcron对titile中包含单引号渲染的问题
+---
+
+app为markdonw类型，如果title中包含单引号，那么渲染存在问题。
+尝试在文章中加入如下头部注解信息试试。
+
+```
+---
+app: markdown
+date: 2017-8-27 07:20:00
+title: bitcron对titile中包含单引号渲染的问题
+tags:
+  - "bitcron"
+---
+```

@@ -1,0 +1,31 @@
+---
+date: 2023-5-14
+title: 为什么海外云厂商没有提供微服务治理功能售卖
+tags: [微服务]
+---
+
+为什么海外云厂商没有提供微服务治理功能售卖？
+
+## 微服务治理包含的内容
+
+变更态流量治理：金丝雀、无损上下线
+常态化流量防护：熔断、降级、限流
+基于零信任的访问控制：
+
+## 观点
+
+架构模式差异：国外微服务架构，业务领域自治，不同开发团队之间走LB互通，变更态流量治理，可以在LB上做。
+变更态流量治理：蓝绿方式解决（App Service、Beanstalk），典型的LB结构
+
+常态化流量防护：开发团队通过写代码方式搞定，只需要配置中心即可；国内开发团队能力水平相对国外较低，需要云厂商提供此能力。
+举例：极米。有一个技术平台小组，刚开始提供了一些框架能力，但是没有持续人力投入，各个业务团队并没有用起来，最后还是期望云厂商提供。
+
+## Reference
+
+[Scaling up the Prime Video audio/video monitoring service and reducing costs by 90%](https://www.primevideotech.com/video-streaming/scaling-up-the-prime-video-audio-video-monitoring-service-and-reducing-costs-by-90)
+
+[Microservices architecture on AWS](https://docs.aws.amazon.com/whitepapers/latest/microservices-on-aws/simple-microservices-architecture-on-aws.html)
+
+[从微服务转为单体架构、成本降低 90%，亚马逊内部案例引发轰动！CTO：莫慌，要持开放心态](https://mp.weixin.qq.com/s/fQtAMf4BfJxdBPWDE5ygwg)
+
+[Twitter-讨论](https://twitter.com/dvassallo/status/1654880475603935232)

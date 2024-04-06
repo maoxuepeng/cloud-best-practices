@@ -1,0 +1,107 @@
+---
+date: 2020-9-7
+title: 多人在线游戏网络通信能力分析
+tags: [多人在线, 游戏, 网络通信]
+---
+
+多人在线（MMO）游戏变得越来越流行，多人在线游戏与传统单机游戏的关键区别点之一是玩家互联。在开发一款多人在线游戏时，必须考虑到玩家之间通过网络互联后、玩家之间消息收发是否顺畅，如果网络时延大，那么用户体验就差。而一款游戏面向的玩家是全国、甚至全球分布的，距离相隔数百上千公里的玩家互联玩游戏，如何保证用户体验？为了解决此问题，就有了游戏网络引擎中间件。同时，多人在线玩游戏还需要交流，从而语音通话、IM的需求也自然而然被导出。
+因此，在多人在线游戏场景下，通信相关的能力需求有：基础网络通信能力（对战数据），语音通话能力，文字聊天能力。
+
+## 游戏网络引擎技术栈
+
+下图是游戏网络引擎技术栈，多人在线游戏通信模式为低时延小包，因此传输层协议一般使用UDP。在UDP之上提供可靠传输等特性，称为实时网络。在此基础上，实现多人对战玩家匹配、语音聊天、文字聊天、视频功能。
+
+![](/images/game-networking/game-networking-1.png)
+
+## Unity Networking (UNet)
+
+![](/images/game-networking/game-networking-unity.png)
+
+uNet Low Level API提供基础的网络通信能力：收发消息、QoS设置。传输协议为UDP，WebGL场景下使用WebSocket。
+
+### uNet领域模型
+
+![](/images/game-networking/game-networking-unity-2.png)
+
+Qos Type: Unreliable,UnreliableFragmented,UnreliableSequenced,Reliable,ReliableFragmented,ReliableSequenced,UnreliableFragmentedSequenced,ReliableFragmentedSequenced,AllCostDelivery,StateUpdate,ReliableStateUpdate.
+
+### uNet LLAPI
+
+1. 初始化
+
+```c
+// An example of initializing the Transport Layer with custom settings GlobalConfig gConfig = new GlobalConfig(); gConfig.MaxPacketSize = 500; NetworkTransport.Init(gConfig);
+
+```
+
+2. 配置网络拓扑，创建Host
+
+```c
+ConnectionConfig config = new ConnectionConfig(); int myReliableChannelId = config.AddChannel(QosType.Reliable); int myUnreliableChannelId = config.AddChannel(QosType.Unreliable);
+HostTopology topology = new HostTopology(config, 10);
+int hostId = NetworkTransport.AddHost(topology, 8888);
+
+```
+
+3. 连接服务器，收发消息
+
+```c
+connectionId = NetworkTransport.Connect(hostId, "192.168.1.42", 8888, 0, out error);
+NetworkTransport.Send(hostId, connectionId, myReliableChannelId, buffer, bufferLength, out error);
+//在update回调函数中收数据
+void Update() {
+int recHostId; int connectionId; int channelId;
+byte[] recBuffer = new byte[1024]; int bufferSize = 1024; int dataSize; byte error; NetworkEventType recData = NetworkTransport.Receive(out recHostId, out connectionId, out channelId, recBuffer, bufferSize, out dataSize, out error);
+switch (recData) {
+  case NetworkEventType.Nothing: break;
+  case NetworkEventType.ConnectEvent: break; case
+  NetworkEventType.DataEvent: break;
+  case NetworkEventType.DisconnectEvent: break;
+  case NetworkEventType.BroadcastEvent: break;
+  }
+}
+
+```
+
+### Unity Transport
+
+Unity Transport 是 uNet LLAPI的下一代。
+
+![](/images/game-networking/game-networking-unit-transport.png)
+
+### Unity NetCode
+
+Unity NetCode是uNet HLAPI的下一代。NetCode基于Unity Transport构建，Unity Transport是Preview状态。
+
+## Photon
+
+![](/images/game-networking/game-networking-photon.png)
+
+## Reference
+
+### Unity Networking and Multi player
+
+https://docs.unity3d.com/Manual/UNetOverview.html
+
+[All about the Unity networking transport layer](https://blogs.unity3d.com/2014/06/11/all-about-the-unity-networking-transport-layer/)
+
+[workflow-client-server](https://docs.unity3d.com/Packages/com.unity.transport@0.4/manual/workflow-client-server.html)
+
+[Unity Real-time Multiplayer Alpha repository](https://github.com/Unity-Technologies/multiplayer)
+
+[photon_network](https://doc-api.photonengine.com/en/pun/v2/class_photon_1_1_pun_1_1_photon_network.html)
+
+[pun-vs-bolt](https://doc.photonengine.com/en-us/pun/current/reference/pun-vs-bolt)
+
+[Unity高级开发-网络（零）高级开发-网络解决方案(Unet已过时)](https://www.jianshu.com/p/a5c0844a0590)
+
+[RakNet](https://github.com/facebookarchive/RakNet)
+
+[Unet vs Photon Engine - A comparison](https://www.youtube.com/watch?v=xLECRl1eyGk)
+
+[Photon C++ Client API](https://doc-api.photonengine.com/en/cpp/current/a05875.html)
+
+### Unity Vivox
+
+[vivox](https://unity.com/products/vivox)
+[Intro to Vivox, the comms technology behind the best multiplayer games](http://uniteseoul.com/2019/PDF/D2T2S7.pdf)

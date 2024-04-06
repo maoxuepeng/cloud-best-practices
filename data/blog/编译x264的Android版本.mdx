@@ -1,0 +1,93 @@
+---
+date: 2020-4-21
+title: 编译x264的Android版本
+tags: [x264, android]
+---
+
+编译Android版本的x264库。
+
+## 编译步骤
+
+### 特别注意点
+
+1. 由于Android NDK在r18以及之后版本，就不包含gcc工具了，改为clang替换。
+2. 建议生成独立NDK工具链编译。
+3. 阅读[NDK官方文档](<(https://developer.android.com/ndk/guides/standalone_toolchain?hl=zh-cn)>)很重要。
+
+### 步骤
+
+1. 获取x264源码
+2. 准备编译环境
+3. 编译
+
+## 获取x264代码
+
+从[官方网站](http://www.videolan.org/developers/x264.html)获取源码。
+
+## 准备编译环境
+
+### 下载NDK
+
+官网下载最新版本[r21](https://dl.google.com/android/repository/android-ndk-r21-linux-x86_64.zip) ，解压到任意目录，如 `~/sources/android-ndk-r21`
+
+### 生成工具链
+
+1. 到DNK解压目录 `cd ~/sources/android-ndk-r21/build/tools`
+2. 执行命令 `python make_standalone_toolchain.py --arch arm64 --api 29 --install-dir ~/sources/ndk-toolchains-arm64-api29/` 生成工具链。工具链生成到 `~/sources/ndk-toolchains-arm64-api29` 目录。
+
+## 编译
+
+### 解压源码
+
+解压x264源码到任意目录，如 `~/source/x264-master`
+
+### configure/make/make install
+
+编译脚本参考
+
+```bash
+
+API_LEVEL=23
+MY_TOOLCHAINS=~/sources/ndk-toolchains-arm64-api${API_LEVEL}
+SYSROOT=$MY_TOOLCHAINS/sysroot
+PREFIX=./android/arm64
+
+# Add the standalone toolchain to the search path.
+export PATH=$PATH:$MY_TOOLCHAINS/bin
+
+# Tell configure what tools to use.
+target_host=aarch64-linux-android
+export AR=$target_host-ar
+export AS=$target_host${API_LEVEL}-clang
+export CC=$target_host${API_LEVEL}-clang
+export CXX=$target_host${API_LEVEL}-clang++
+export LD=$target_host-ld
+export STRIP=$target_host-strip
+
+# Tell configure what flags Android requires.
+export CFLAGS="-fPIE -fPIC"
+export LDFLAGS="-pie"
+export EXTRA_CFLAGS="-mfloat-abi=softfp -mfpu=neon"
+
+./configure \
+    --prefix=${PREFIX} \
+    --enable-shared \
+    --enable-static \
+    --enable-pic \
+    --disable-asm \
+    --host=arm-linux \
+    --sysroot=${SYSROOT}
+
+make clean
+make
+make install
+
+```
+
+编译完成后，在当前目录的 `android/arm64/` 目录下就有所有的输出文件了。
+
+## Reference
+
+[NDK 独立工具链](https://developer.android.com/ndk/guides/standalone_toolchain?hl=zh-cn)
+
+[x264](http://www.videolan.org/developers/x264.html)

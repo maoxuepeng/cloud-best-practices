@@ -1,0 +1,143 @@
+---
+date: 2019-4-27
+title: 公有云上信封加密与密钥管理实践
+tags: [DigitalEnvelope, KMS(KeyManagementSystem)]
+---
+
+## 信封加密原理
+
+信封加密使用对称加密AES+非对称加密RSA两种实现，使用RSA加密AES算法的Key，并将Key与一并存储或传输，密文+加密的AES Key就形象比喻为信封。
+
+信封加密用于加密大量数据的场景，由于RSA加密的长度不允许超过RSA Key长度（通常RSA Key长度为1024/2048/4096 bit），因此对于大文件加密的场景，如图片/视频/文本等，需要使用对称加密算法。对称加密算法的Key在网路或组织之间传输存在泄露风险，因此使用RSA非对称算法加密对称密钥的Key，可以保证Key的安全传输。
+
+信封加密实际上在SSL协议中就有使用，SSL协议在交换公钥之后，最终会协商一个AES加密的Key，这个Key在双方之间传输时候是使用RSA算法加密的。
+
+### 信封加密的加密过程
+
+![](/images/DE1.png)
+
+1. 生成AES明文密钥
+2. 使用AES明文密钥加密数据
+3. 使用RSA公钥加密AES明文密钥，得到密文密钥
+4. 密文密钥与加密数据一并存储，这两者形象比喻为装到信封里
+
+### 信封加密的解密过程
+
+![](/images/DE1.png)
+
+1. 数据接收者接收到信封，里面包含密文数据与
+2. 使用RSA私钥解密AES密文密钥，得到明文密钥
+3. 使用AES明文密钥解密密文数据
+
+## 公有云 KMS 服务
+
+信封加密的关键是加密对称密钥的RSA Key，RSA Key需要主密钥管理、数据加密密钥管理、有访问控制、访问审计日志、Key轮换更新的功能。
+当前各大公有云厂商都提供密钥管理服务，并且与云服务器对接集成，如对象存储服务可以使用KMS加密数据，RDS可以使用KMS加密硬盘数据。
+
+- 主密钥管理：创建新的主密钥、从已有密钥导入到KMS、主密钥轮换更新（加密的数据密钥中记录了使用哪个主密钥加密，主密钥轮换更新后之前的密钥还存在）、密钥访问控制、访问审计日志。
+- 数据加密密钥管理：创建、加密、解密。
+- 云服务对接：对象存储、云硬盘、数据库等。
+
+### 使用自定义密钥材料作为根密钥
+
+企业一般会存在已经在使用的AES加密密钥，如线上线下数据交换，存在一方加密数据在另一方解密，要求密钥一致。因此需要在创建主加密密钥的时候，导入已有的密钥材料创建。
+使用已有密钥材料导入到KMS创建主密钥的流程为：从KMS服务下载RSA公钥（用于加密主密钥材料）、指定RSA填充算法、用RSA公钥+RSA算法加密密钥材料、导入到KMS。
+
+可以参考华为云KMS导入主密钥的[帮助文档](https://support.huaweicloud.com/usermanual-dew/dew_01_0089.html)，下面是参考[帮助文档](https://support.huaweicloud.com/usermanual-dew/dew_01_0089.html)的操作实例。
+
+1. 从KMS服务下载RSA公钥，并选择RSA 填充算法
+
+华为云下载加密AES密钥材料所需的内容为三个文件：
+
+```
+drwxr-xr-x 1 user01 1049089    0 4月  28 19:47 ./
+drwxr-xr-x 1 user01 1049089    0 4月  28 19:47 ../
+-rw-r--r-- 1 user01 1049089 2236 4月  28 19:46 importToken_d4a19541-800d-4a6c-9678-c9c7d7249887_20190428114633
+-rw-r--r-- 1 user01 1049089  302 4月  28 19:46 README_d4a19541-800d-4a6c-9678-c9c7d7249887_20190428114633.txt
+-rw-r--r-- 1 user01 1049089  294 4月  28 19:46 wrappingKey_d4a19541-800d-4a6c-9678-c9c7d7249887_20190428114633
+```
+
+- wrappingKey*密钥ID*下载时间：即包装密钥，用于加密密钥材料的包装密钥
+- importToken*密钥ID*下载时间：即导入令牌，KMS导入密钥材料时需要使用
+- README*密钥ID*下载时间：即说明文件，记录包装密钥序列号、密钥包装算法、包装密钥文件名称、令牌文件名称以及包装密钥和令牌的过期时间
+
+README 内容
+
+```
+$ cat README_d4a19541-800d-4a6c-9678-c9c7d7249887_20190428114633.txt
+Wrapping Key Spec: RSA_2048
+Wrapping Algorithm: RSAES_OAEP_SHA_1
+Wrapping Key File: wrappingKey_d4a19541-800d-4a6c-9678-c9c7d7249887_20190428114633
+Import Token File: importToken_d4a19541-800d-4a6c-9678-c9c7d7249887_20190428114633
+Wrapping Key and Import Token Expiration: 2019-04-29 11:46:33 UTC
+
+```
+
+2. 生成256位的AES密钥材料
+
+AES 密钥长度为256 bits，使用openssl生成密钥材料
+
+```
+openssl rand -out plain-text-key-material.bin 32
+```
+
+3. 使用RSA公钥并选择填充算法加密AES密钥材料
+
+```
+ openssl pkeyutl -in plain-text-key-material.bin -inkey wrappingKey_d4a19541-800d-4a6c-9678-c9c7d7249887_20190428114633 -out encrypted-key-material.bin -keyform der -pubin -encrypt -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha1
+```
+
+4. 将AES密钥材料导入到KMS
+
+在公有云界面上操作导入。
+
+### 使用导入的主密钥创建数据加密密钥并加解密数据
+
+参考[样例代码](https://github.com/ibusybox/CloudBestPracticeSamples/tree/master/huaweicloud-kms-edecrypt)。
+
+需要注意的是，在华为云上目前创建的数据密钥长度只能是512位，512位密钥长度只能用于AES-XTS算法，此算法目前主要用于磁盘加密。
+
+如果在应用里集成KMS的话，应用程序AES加密算法常用的为AES-CBC，密钥最长是256位，因此基于现状只能将512位的密钥截断，但是截断之后会带来一些列问题，如何保证各个团队之间截断规则一致？信封加密场景，是将截断后的密钥与密文数据一并存储还是截断前的？截断后密钥与KMS里保存的密钥不一致会不会导致未知问题？
+
+目前[阿里云](https://help.aliyun.com/document_detail/28948.html)可以支持创建数据加密密钥时候，指定密钥长度为128位或256位。
+
+### 关于RSA填充
+
+RSA 填充算法能保证语义安全，同一个明文每次加密出来的密文都是不同，填充算法是在明文中填充一些随机数达到这个效果。由于RSA加密要求密文长度不能大于Key长度，因此使用P填充算法之后，对原始密文长度限制也有所变化。
+
+当前主要有3种填充算法：RSA_PKCS1_PADDING/RSA_PKCS1_OAEP_PADDING/RSA_NO_PADDING
+
+#### RSA_PKCS1_PADDING 最常用的模式
+
+输入：必须 比 RSA 钥模长(modulus) 短至少11个字节, 也就是　RSA_size(rsa) – 11，如果输入的明文过长，必须切割，　然后填充
+输出：和modulus一样长
+
+根据这个要求，对于512bit的密钥，　block length = 512/8 – 11 = 53 字节
+
+#### RSA_PKCS1_OAEP_PADDING
+
+输入：RSA_size(rsa) – 41
+输出：和modulus一样长
+
+#### RSA_NO_PADDING 不填充
+
+输入：可以和RSA钥模长一样长，如果输入的明文过长，必须切割，然后填充
+输出：和modulus一样长
+
+## Reference
+
+[PKCS#1 V2](https://www.emc.com/collateral/white-papers/h11300-pkcs-1v2-2-rsa-cryptography-standard-wp.pdf)
+
+[RAS算法原理一](http://www.ruanyifeng.com/blog/2013/06/rsa_algorithm_part_one.html)
+
+[RAS算法原理二](http://www.ruanyifeng.com/blog/2013/07/rsa_algorithm_part_two.html)
+
+[RSA加密演算法](https://zh.wikipedia.org/wiki/RSA%E5%8A%A0%E5%AF%86%E6%BC%94%E7%AE%97%E6%B3%95)
+
+[Padding&Text-book-rsa](https://crypto.stackexchange.com/questions/1448/definition-of-textbook-rsa)
+
+[Java AES and using my own Key](https://stackoverflow.com/questions/3451670/java-aes-and-using-my-own-key)
+
+[Java Cryptography Extension (JCE) Unlimited Strength Jurisdiction Policy Files 8 Download](https://www.oracle.com/technetwork/java/javase/downloads/jce8-download-2133166.html)
+
+[Java 常用加密算法使用与整理](https://www.jianshu.com/p/f8cd7391d641)
