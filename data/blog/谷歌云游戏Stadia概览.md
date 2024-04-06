@@ -1,0 +1,113 @@
+---
+date: 2019-9-28
+title: 谷歌云游戏Stadia概览
+tags: [游戏, 谷歌, 云游戏, Stadia]
+---
+
+在2019年3月份的谷歌开发者大会**GDC 2019**上，谷歌发布了其云游戏解决方案，命名为**Stadia**，引发了外界不少关注。谷歌发布的云游戏解决方案包含整个游戏产业链各个环节：游戏制作方面自己成立游戏工作室同时也与CP合作（如发布会上演示的刺客信条奥德赛，就是与育碧合作的），游戏开发提供云游戏特有的开发、测试、调优工具与运行平台，基于谷歌云提供云游戏基础设置（计算/网络）、自己运营游戏（用户可订阅方式玩云游戏），并发布了游戏手柄。谷歌这一番操作的意图，志在千亿美金市场规模的游戏市场分得一杯羹。本文通过GDC大会上的材料，汇总总结谷歌云游戏Stadia的概貌。
+
+## 游戏行业概况
+
+### 游戏类型
+
+游戏领域内，按照玩游戏方式不同或使用不同设备玩游戏差异，可以将游戏划分为不同的类别：手游、掌游、主机游戏、PC游戏。不同的游戏内容在制作时候就会确定其游玩方式与设备，如王者荣耀就是设计在手机上游玩的手游，如GDC演示的育碧大作”刺客信条奥德赛“就是设计在主机与PC上玩的游戏。下面表格列举不同游戏的差别。
+
+|   |手游|掌游|主机游戏|PC游戏|
+|---|---|---|---|---|
+|设备类型/厂家|手机|掌机/[任天堂](https://www.nintendo.co.jp/)|游戏主机/微软XBox/索尼PlayStation|PC电脑|
+|游玩方式|手机触屏游玩|掌机设备按键|手柄+大屏|显示器+键盘+鼠标|
+|流行国家与地区|中国美日韩|美日韩|美日韩/中国|
+|典型游戏|王者荣耀|超级马里奥|刺客信条奥德赛|魔兽世界，绝地求生|
+
+### 游戏市场现状
+
+在开始讨论云游戏之前，先了解游戏市场的现状。从 Newzoo 的 [2019年全球游戏市场报告](https://newzoo.com/insights/trend-reports/newzoo-2019%E5%B9%B4%E5%85%A8%E7%90%83%E6%B8%B8%E6%88%8F%E5%B8%82%E5%9C%BA%E6%8A%A5%E5%91%8A%E5%85%8D%E8%B4%B9%E7%89%88/) 中，我们可以得到下面几点信息。
+
+- 游戏市场份额，按照地区划分，亚太（中国/日本/韩国）占比，北美占比，欧洲中东占比。
+- 游戏类型占比，手游占比，PC游戏占比，主机游戏占比；手游在逐渐蚕食PC游戏的份额，主机游戏基本盘维持不变，缓慢增长。
+- 中国主游戏市场绝大部分是手游（消费习惯：玩家不愿意购买昂贵的主机游戏；政策管控：国外大牌主机游戏厂家在国中一直未获得授权，加上近期游戏版号管控游戏内容更难进来了）。
+
+## 云游戏
+
+### 云游戏场景
+
+云游戏是一种新的商业模式，主要针对主机游戏与PC游戏场景下，玩家需要在硬件设施上花费不少费用，导致部分非硬核玩家被排除在游戏之外。云游戏的模式是将主机与PC游戏运行在云上，通过瘦客户端（显示器、大屏、手柄）接入，无需购买主机设备，同时游戏内容也采取订阅而不是当前的买断模式。这种模式极大降低了玩家门槛，对游戏玩家来说是现象级的改变。
+
+云游戏除了对玩家来说是现象级的改变，对游戏产业链中其他角色，改变也是巨大的。
+
+| 角色  | 变化点  |
+|---|---|
+|玩家| 无需购买硬件设施；游戏按需订阅游玩；更多新玩法：从朋友分享的链接直接加入游戏局、从直播界面加入游戏等 |
+|内容提供商|云游戏是一种新的游戏开发、调试、调优模式，甚至会有专门适配云游戏的游戏|
+|设备提供商|云游戏在体验上与玩家购买硬件设备玩的方式还是有差距，对硬核玩家来说会继续购买游戏设备，云游戏抢占的用户还是非硬核玩家这一部分|
+|云厂家|新入局玩家，为云游戏提供基础设施|
+
+### 云游戏原理
+
+云游戏的原理可以简单理解为类似远程桌面，典型云游戏由“云游戏客户端->游戏客户端->游戏服”三层构成。
+
+- 云游戏客户端：由输入设备与显示设备构成，输入设备通常是手柄或键盘/鼠标，显示设备通常是大屏。云游戏客户端对计算与图形渲染能力没有过高要求，因为客户端只负责输出云端传输过来的视频流。
+- 游戏客户端：传统游戏模式下的游戏软件，对于单机版游戏来说安装游戏软件就可以玩了，对于联网游玩的游戏，还需要连接到游戏服游玩。
+- 游戏服：游戏服务，为多个游戏客户端提供游戏对战、归档、装备交易等功能。
+
+云游戏模式下将游戏客户端运行在云端，玩家通过云游戏客户端输入指令，传输到游戏客户端，客户端接收并执行指令，根据指令执行结果渲染画面，画面传输到云游戏客户端，显示给玩家。
+云游戏期望达到的效果，是与在本地玩游戏没有区别。
+
+### 云游戏系统构成
+
+要实现一个云游戏的服务，至少需要包含如下部件：
+
+- 游戏云化：云基础设施：云游戏可能会使用到边缘计算，靠近用户部署降低时延；5G网络切片技术也存在结合点。
+- 游戏云化：云游戏生命周期管理：传统游戏包如何运行到云上，包括打包格式，仓库，运行环境，监控，弹性伸缩等。
+- 游戏云化：音视频编解码：适合云游戏的音视频编码/解码器。
+- 游戏云化：传输协议：为了保证用户体验，针对云游戏场景的视频流与控制指令传输协议
+- 游戏运营：游戏上架与分发。
+- 云游戏体验优化：要实现云游戏游玩接近本地游玩体验，需要专门的优化；下面讲到的谷歌云游戏Stadia技术实现，重点就是用户体验优化。
+
+## 谷歌云游戏Staida技术实现
+
+云游戏技术实现可以简单理解为直播+控制。
+
+传统的视频流服务模型：
+![](/images/stadia/stadia-a-tipical-video-streaming-service.png)
+
+云游戏是在视频流的基础上，增加了控制；同时对时延的要求比直播要高（端到端的时延不能超过100ms）：
+![](/images/stadia/stadia-cloud-gaming-how-is-different.png)
+
+云游戏的架构：
+![](/images/stadia/stadia-a-cloud-gaming-system.png)
+
+云游戏架构中，核心部件是**Streamer**，Streamer的目标是保证在不同网络条件下云游戏的最佳体验，使用到的技术手段有：
+
+- BBR 拥塞控制算法
+- 基于QUIC的传输协议
+- 编码器的参数（如码率）动态调整
+- 基于客户端反馈的编码器参数预测模型，实时调优
+- 跟踪每一帧的传输情况，而不是字节
+
+![](/images/stadia/stadia-a-delicate-balancing-act.png)
+![](/images/staida/stadia-putting-it-together-cloud-gaming-2.png)
+
+举例说明Streamer根据客户端反馈调优编码器：网络链路因抢占(Competing flow)拥塞时，控制器降低码率，当到第五个帧时候，控制器认为需要传输一个I帧补救。
+
+![](/images/stadia/stadia-putting-it-together-cloud-gaming.png)
+
+## Reference
+
+[newzoo-2019年全球游戏市场报告免费版](https://newzoo.com/insights/trend-reports/newzoo-2019%E5%B9%B4%E5%85%A8%E7%90%83%E6%B8%B8%E6%88%8F%E5%B8%82%E5%9C%BA%E6%8A%A5%E5%91%8A%E5%85%8D%E8%B4%B9%E7%89%88/)
+
+[Real-time Audio-Visual Media Transport over QUIC](https://csperkins.org/publications/2018/12/perkins2018rtp-quic.pdf)
+
+[理解低延迟视频编码的正确姿势](https://cloud.tencent.com/developer/article/1358721)
+
+[设置直播编码器](https://support.google.com/youtube/answer/2907883?hl=zh-Hans&ref_topic=9257892)
+
+[Video Encoding Settings for H.264 Excellence](http://www.lighterra.com/papers/videoencodingh264/)
+
+[everything you need to know about google game streaming service](https://www.techradar.com/news/stadia-everything-you-need-to-know-about-googles-game-streaming-service)
+
+[google stadia technical deep dive](https://stadia.dev/intl/en/blog/gdc-2019-session:gaming-in-the-cloud:a-technical-deep-dive/)
+
+[Stadia tech review: the best game streaming yet, but far from ready](https://www.eurogamer.net/articles/digitalfoundry-2019-stadia-tech-review)
+
+[Google I/O: Stadia team says latency in game streaming is a thing of the past](https://www.digitaltrends.com/gaming/google-stadia-latency-tech-discussion-i-o-2019/)

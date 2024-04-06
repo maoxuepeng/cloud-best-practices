@@ -1,0 +1,114 @@
+---
+date: 2019-10-08
+title: 使用curl工具分析HTTP请求网络时延
+tags: [网络时延, curl, timing]
+---
+
+```curl``` 是一个非常优秀的网络测试工具，也是目前使用最广泛的网络测试工具之一，特别是在HTTP协议的支持上，可以算是最优秀、使用最广泛的工具，没有之一。```curl```提供命令行工具与API库，开发者可以在脚本中集成命令行工具、在应用程序中集成库。```curl```可以抓取到网络与通信协议传输中各个阶段的耗时数据，在分析网络性能的时候特别好用。
+
+## 典型的HTTP请求流
+
+在当前互联网应用架构上，一个典型的HTTP请求流，从客户端发起请求，通过LocalDNS解析域名得到负载均衡服务的IP地址，访问负载均衡服务的IP地址，负载均衡服务完成证书卸载，将请求转发到后端服务。
+
+```html
+                Client          LocalDNS            LoadBalancer          BackendService
+                  |                |                    |                           |
+                  |--1.1 DNS Req---|                    |                           |
+time_namelookup   |<-1.2 DNS Resp--|                    |                           |
+                  |                                     |                           |
+                  |---------2.1 TCP SYNC--------------->|                           |
+                  |<--------2.2 TCP ACK/SYNC------------|                           |
+time_connect      |---------2.3 TCP ACK---------------->|                           |
+                  |                                     |                           |
+                  |--3.1 SSL ClientHello--------------->|                           |
+                  |<-3.2 SSL ServerHello/Certificate----|                           |
+                  |--3.3 SSL ClientKeyEx/ChangeCipher-->|                           |
+time_appconnect   |<-3.4 SSL ChangeCipher/Finished------|                           |
+                  |                                     |                           |
+time_pretransfer  |--4.1 HTTP Request------------------>|                           |
+                  |<-4.2 HTTP StatusCode 100 Continue---|                           |
+                  |--4.3 HTTP Request Complete--------->|                           |
+                  |                                     |--4.4 HTTP Request-------->|
+                  |                                     |<-4.5 HTTP Response--------|
+time_starttransfer|<-4.6 HTTP Response------------------|                           |
+time_total        |                                     |                           |
+
+```
+
+通过上述HTTP请求流程拆解，可以得出HTTP请求的4个大段：
+
+1. DNS解析
+2. TCP建连
+3. SSL握手
+4. HTTP协议交互
+
+通过```curl```工具作为客户端，向服务端发起HTTP请求，可以采集上述4个分段的时延。
+
+## 分段数据采集
+
+```curl``` 命令通过 ```-w, --write-out <format>``` 选项可以获取到上述4个分段的时延数据。
+```-w``` 的参数格式为 ```-w "...${var}..."``` ，其中 ```${var}``` 是由 ```curl``` 提供的变量，通过这些变量就可以获得到时延数据。
+
+需要注意的是，```curl```输出的每个变量值，是包含所有分段时延总值，因此计算每个分段时候需要做减法。
+
+### 1. DNS解析
+
+通过变量 ```time_namelookup``` 获取DNS解析时延。
+
+**time_namelookup** ```The time, in seconds, it took from the start until the name resolving was completed.```
+
+### 2. TCP建连
+
+通过变量 ```time_connect``` 获取TCP连接时延，此值包含了DNS解析的时延```time_namelookup```。因此，
+
+**TCP连接时延** = ```(time_connect - time_namelookup)```
+
+**time_connect** ```The time, in seconds, it took from the start until the TCP connect to the remote host (or proxy) was completed.```
+
+**RTT(Round Trip Time)** 是一个重要的网络参数指标，TCP连接时延可以约等于**RTT**。
+
+**RTT** ~= **TCP连接时延**
+
+### 3. SSL握手
+
+通过变量 ```time_appconnect``` 获取SSL握手时延，此值包含了```time_connect```。因此，
+
+**SSL握手时延** = ```(time_appconnect-time_connect)```
+
+**time_appconnect** ```The time, in seconds, it took from the start until the SSL/SSH/etc connect/handshake to the remote host was completed. (Added in 7.19.0).```
+
+### 4. HTTP协议交互
+
+通过变量```time_pretransfer```获取客户端开始发送HTTP请求时延。
+通过```time_starttransfer```获取客户端开始接收HTTP响应的第一个字节时延，也就是 **TTFB**(Time to First Byte)。
+通过```time_total```获取整个HTTP通信的时延。
+
+**HTTP协议交互时延** = ```(time_total-time_pretransfer)```
+
+**HTTP数据传输时延** = ```(time_total-time_starttransfer)```，根据此值与响应消息包大小可以计算出**带宽**。
+
+**time_pretransfer** ```The time, in seconds, it took from the start until the file transfer was just about to begin. This includes all pre-transfer commands and negotiations that are specific to the particular protocol(s) involved.```
+
+**time_starttransfer** ```The time, in seconds, it took from the start until the first byte was just about to be transferred. This includes time_pretransfer and also the time the server needed to calculate the result.```
+
+**time_total** ```The total time, in seconds, that the full operation lasted.```
+
+### 对于POST请求大于1024字节时的time_starttransfer值
+
+```curl``` 发送POST请求的Body大于1024字节的时候，默认会在HTTP请求头中增加```Expect: 100-continue```，那么此时负载均衡服务会回复一个状态码为```100```的响应，此时```time_starttransfer``` 的值是 ```curl```接收状态码为```100```的响应时间，而不是实际开始接收后端服务响应数据的时间，如果负载均衡服务与后端服务地理位置分离部署，这个值就会差别很大。
+
+为了避免这种情况，可以在```curl```命令行中显示禁用```Expect: 100-continue```消息头：
+
+```curl -H 'Expect:' ...```
+
+## Reference
+
+[A Question of Timing](https://blog.cloudflare.com/a-question-of-timing/)
+
+[curl](https://curl.haxx.se/)
+
+[curl man page](https://curl.haxx.se/docs/manpage.html)
+
+[Why CURL return and error (23) Failed writing body?](https://stackoverflow.com/questions/16703647/why-curl-return-and-error-23-failed-writing-body)
+
+[When curl sends 100-continue](https://gms.tf/when-curl-sends-100-continue.html)

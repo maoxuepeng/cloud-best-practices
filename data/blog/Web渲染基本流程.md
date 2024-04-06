@@ -1,0 +1,104 @@
+---
+date: 2020-9-10
+title: Web渲染基本流程
+tags: [Web, 渲染, Blink, WebKit]
+---
+
+本文介绍Web浏览器（Chromium、Safari）渲染基本流程，包含2D/3D渲染。
+
+## 概述
+
+浏览器渲染引擎(WebKit/Blink)渲染分为4个阶段：
+
+1. Paint: 浏览器渲染引擎（Render）解析DOM为RenderObjectTree，RenderObjectTree转换为RenderLayerTree。页面更新触发paint生成。
+2. Compositor: Render将RenderLayerTree转为GraphicTree，生成图形渲染引擎绘图指令、素材。
+3. Draw: 图形渲染引擎执行渲染流水线（渲染管线），生成位图数据。
+4. Display: 窗口合成，上屏。
+
+## Phase1: Paint
+
+将DOM树转为Render Layer树。
+
+![](/images/rendering/rending-paint.png)
+
+## Phase2: Compositor
+
+Phase1结束之后，此时已经具备绘图的条件了，将DisplayItme List的数据结构转换为绘图指令即可。但是出于性能考虑，引入Compositor阶段。
+
+1. 把RenderLayer归类到GraphicsLayer，GraphicsLayer可以认为是Surface的抽象。每个GraphicsLayer会关联一个GraphicsContext（GraphicsContext是一个抽象类，对于不同的绘图对象有不同的实现，如在WebKit中就有GraphicsContextCG(CoreGraphics), GraphicsContextGL(openGL)等)。
+
+Source\WebCore\platform\graphics\GraphicsLayer.h
+
+```c
+// GraphicsLayer is an abstraction for a rendering surface with backing store,
+// which may have associated transformation and animations.
+
+class GraphicsLayer : public RefCounted<GraphicsLayer> {
+    WTF_MAKE_FAST_ALLOCATED;
+public:
+    enum class Type : uint8_t {
+        Normal,
+        PageTiledBacking,
+        ScrollContainer,
+        ScrolledContents,
+        Shape
+    };
+...
+```
+
+2. GraphicsLayer归类的依据是: 每个GraphicsLayer可以独立栅格化（多线程并行栅格化）。动画是一个GraphicsLayer，Canvas是一个GraphicsLayer等。
+   - Layer has 3D or perspective transform CSS properties
+   - Layer is used by \<video> element using accelerated video decoding
+   - Layer is used by a \<canvas> element with a 3D context or accelerated 2D context
+   - Layer is used for a composited plugin
+   - Layer uses a CSS animation for its opacity or uses an animated webkit transform
+   - Layer uses accelerated CSS filters 
+   - Layer has a descendant that is a compositing layer  
+   - Layer has a sibling with a lower z-index which has a compositing layer (in other words the layer overlaps a composited layer and should be rendered on top of it)
+3. Tilling，将GraphicsLayer分成很多Tile，根据ViewPort视窗确定哪些Tile需要绘制
+4. Compositor 可独立响应用户输入（如果处理不了再转给主线程）；特别是滚动，缩放操作，不涉及到重排(laytou计算)与重绘(paint)，直接合成
+5. 上述动作都在一个独立的Compositor线程中执行，对于不需要重排（layout），重绘（style）的页面更新，不需要主线程参与，减轻主线程负担
+
+### 2D
+
+2D 图形渲染Composite步骤。
+
+![](/images/rendering/rending-composite.png)
+
+### 3D
+
+3D(WebGL)图形渲染，不需要composite步骤，在Render进程中解析WebGL API，转换为OpenGL API，在GPU进程中渲染。
+
+![](/images/rendering/rending-3d.png)
+
+## Phase3: Draw
+
+Render进程中的Compositor使用GPU的SDK，将绘图指令，转换为图形渲染指令：
+
+1. 对于2D图形渲染，转换为Skia指令(Chromium), CoreGraphics指令(Safari)
+2. 对于WebGL，转换为OpenGL(ES）指令
+
+在Chrome中，存在一个独立的GPU进程负责图形渲染。
+
+Compositor与GPU进程之间通过共享内存通信，Compositor将指令、绘图素材通过CommandBuffer结构体封装后放到共享内存中，GPU进程读取后执行渲染。
+
+![](/images/rendering/rendering-draw.png)
+
+## Phase 4: Display
+
+GPU/CPU执行渲染流水线。
+
+- 2D使用Skia(Chromium), CoreGraphics(Safari)图形引擎渲染。
+- 3D(WebGL)使用OpenGL渲染。
+
+## Reference
+
+[gpu-accelerated-compositing-in-chrome](https://www.chromium.org/developers/design-documents/gpu-accelerated-compositing-in-chrome)
+
+[⛩️ History of the World of Chrome Graphics, part 1 ⛩️.pptx](/archives/rendering/⛩️%20History%20of%20the%20World%20of%20Chrome%20Graphics,%20part%201%20⛩️.pptx)
+
+[Life of a Pixel](/archives/rendering/Life%20of%20a%20Pixel.pptx)
+
+[Android WebView rendering](/archives/rendering/Android%20WebView%20rendering.pptx)
+
+[How Blink works](/archives/rendering/How%20Blink%20works.pdf)
